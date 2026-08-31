@@ -1,6 +1,6 @@
 # pi-harness
 
-A minimal Python terminal agent harness backed by [Pi's unified LLM API](https://github.com/earendil-works/pi/tree/main/packages/ai). Python owns the agent loop and tools; a small Node.js bridge uses the upstream `@earendil-works/pi-ai` library for providers, authentication, model catalogs, and streaming.
+A lightweight agent runtime for AI tools written in Python, with tool calling, per-task state management, and [Pi's unified LLM API](https://github.com/earendil-works/pi/tree/main/packages/ai). Python owns the agent loop and tools; a small Node.js bridge uses the upstream `@earendil-works/pi-ai` library for providers, authentication, model catalogs, and streaming.
 
 Each run takes a single prompt, executes an autonomous tool loop, returns a result, and exits. There is no interactive chat or cross-task conversation history.
 
@@ -19,10 +19,11 @@ For OpenAI, select `openai` for API keys or `openai-codex` for OAuth. Credential
 
 Use `uv run pi-harness providers` to list supported providers and `--provider` / `--model` to select one.
 
+## Custom Python AI tools
 
-## Custom Python / 3D tools
+Wrap existing Python functions, models, or pipelines as tools for inference, computer vision, text processing, retrieval, data analysis, or 3D workflows. Tools run directly in Python, so they can reuse your libraries and loaded models without going through shell commands.
 
-The CLI registers `bash`. Pass Python tools to `Agent` to extend it directly:
+The CLI registers `bash`. Pass custom `Tool` objects to `Agent` to integrate your own Python AI tools. This minimal text-processing example shows the interface; replace the function body with your own implementation:
 
 ```python
 from pathlib import Path
@@ -30,33 +31,32 @@ from pathlib import Path
 from pi_harness import Agent, PiClient, Tool, ToolContext
 
 
-def inspect_scene(args, context: ToolContext):
-    scene_path = (context.cwd / args["path"]).resolve()
-    # Call Open3D, PyTorch3D, or the Blender Python API here.
-    return {"scene": str(scene_path)}
+def analyze_text(args, context: ToolContext):
+    text = args["text"]
+    return {"characters": len(text), "words": len(text.split())}
 
 
-scene_tool = Tool(
-    name="inspect_scene",
-    description="Inspect a local 3D scene and return a compact summary.",
+text_tool = Tool(
+    name="analyze_text",
+    description="Count the characters and words in a text.",
     parameters={
         "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"],
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
         "additionalProperties": False,
     },
-    executor=inspect_scene,
+    executor=analyze_text,
 )
 
 with PiClient(provider="openai") as client:
     agent = Agent(
         client=client,
         model="gpt-5.6-sol",
-        instructions="You are a 3D vision agent.",
-        tools=[scene_tool],
+        instructions="Use the available Python tools to complete the task.",
+        tools=[text_tool],
         cwd=Path.cwd(),
     )
-    print(agent.run("Inspect scene.glb").text)
+    print(agent.run("Analyze this text: Python tools power AI workflows.").text)
 ```
 
 Existing `Agent(client=OpenAI(...), ...)` integrations remain supported through the optional `openai` extra (`uv sync --extra openai`).
