@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pi-terminal-harness"
+version = "0.1.0"
+description = "A minimal Pi-like terminal agent harness in Python"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "httpx2[socks]>=2.12,<3",
+  "openai>=3.6,<4",
+]
+
+[project.scripts]
+pi-harness = "pi_harness.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_harness"]
