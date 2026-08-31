@@ -6,6 +6,8 @@ import json
 import os
 import pty
 import select
+import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -87,6 +89,55 @@ class StubHandler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
 
+def recv_exact(connection, size):
+    chunks = []
+    while size:
+        chunk = connection.recv(size)
+        if not chunk:
+            raise ConnectionError("SOCKS client disconnected")
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+class SocksHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        client = self.request
+        client.settimeout(10)
+        version, methods = recv_exact(client, 2)
+        if version != 5:
+            raise ConnectionError("Expected SOCKS5")
+        recv_exact(client, methods)
+        client.sendall(b"\x05\x00")
+        version, command, _, address_type = recv_exact(client, 4)
+        if version != 5 or command != 1:
+            raise ConnectionError("Expected a SOCKS5 CONNECT request")
+        if address_type == 1:
+            host = socket.inet_ntoa(recv_exact(client, 4))
+        elif address_type == 3:
+            host = recv_exact(client, recv_exact(client, 1)[0]).decode()
+        elif address_type == 4:
+            host = socket.inet_ntop(socket.AF_INET6, recv_exact(client, 16))
+        else:
+            raise ConnectionError("Unsupported SOCKS5 address type")
+        port = int.from_bytes(recv_exact(client, 2), "big")
+        self.server.destinations.append((host, port))
+        upstream = socket.create_connection((host, port), timeout=10)
+        try:
+            client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            while True:
+                readable, _, _ = select.select([client, upstream], [], [], 10)
+                if not readable:
+                    break
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    (upstream if source is client else client).sendall(data)
+        finally:
+            upstream.close()
+
+
 @unittest.skipUnless(
     (runtime_directory() / "node_modules/@earendil-works/pi-ai/dist/index.js").exists(),
     "run pi-harness setup to enable Pi integration tests",
@@ -107,6 +158,10 @@ class BridgeIntegrationTests(unittest.TestCase):
                     "http_proxy",
                     "https_proxy",
                     "all_proxy",
+                    "NO_PROXY",
+                    "no_proxy",
+                    "PI_PROXY",
+                    "PI_NO_PROXY",
                 )
             },
         )
@@ -131,6 +186,65 @@ class BridgeIntegrationTests(unittest.TestCase):
 
         self.addCleanup(close)
         return server, f"http://127.0.0.1:{server.server_port}/v1"
+
+    def socks_server(self):
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SocksHandler)
+        server.daemon_threads = True
+        server.destinations = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def close():
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.addCleanup(close)
+        return server
+
+    def test_proxy_environment_routes_socks_and_honors_bypass(self):
+        target, base_url = self.server([openai_events(), openai_events()])
+        proxy = self.socks_server()
+        runtime = runtime_directory()
+        script = """
+const { installProxySupport } = await import(process.argv[1]);
+installProxySupport();
+const response = await fetch(process.argv[2], {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+});
+console.log(JSON.stringify({ status: response.status, body: await response.text() }));
+"""
+
+        def fetch(no_proxy=""):
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PI_PROXY": f"socks5h://127.0.0.1:{proxy.server_address[1]}",
+                    "PI_NO_PROXY": no_proxy,
+                }
+            )
+            result = subprocess.run(
+                [
+                    "node",
+                    "--input-type=module",
+                    "-e",
+                    script,
+                    str(runtime / "proxy.mjs"),
+                    base_url,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["status"], 200)
+
+        fetch()
+        self.assertEqual(proxy.destinations, [("127.0.0.1", target.server_port)])
+        fetch("127.0.0.1")
+        self.assertEqual(proxy.destinations, [("127.0.0.1", target.server_port)])
 
     def test_all_providers_and_oauth_methods_are_exposed(self):
         providers = self.client().get_providers()

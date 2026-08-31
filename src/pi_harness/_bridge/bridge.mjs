@@ -3,10 +3,12 @@ import { Writable } from 'node:stream';
 import { once } from 'node:events';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { FileCredentialStore, FileCatalogStore } from './credentials.mjs';
+import { installProxySupport } from './proxy.mjs';
 
 const controller = new AbortController();
 process.on('SIGTERM', () => controller.abort());
 process.on('SIGINT', () => controller.abort());
+installProxySupport();
 const credentials = new FileCredentialStore(process.argv[2]);
 const models = builtinModels({ credentials, modelsStore: new FileCatalogStore(`${process.argv[2]}.models.json`) });
 

@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any, Self
 
 _ASSETS = Path(__file__).with_name("_bridge")
-_FILES = ("package.json", "package-lock.json", "bridge.mjs", "credentials.mjs")
+_FILES = (
+    "package.json",
+    "package-lock.json",
+    "bridge.mjs",
+    "credentials.mjs",
+    "proxy.mjs",
+)
 
 
 class PiError(RuntimeError):
