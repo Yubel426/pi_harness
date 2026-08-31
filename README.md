@@ -19,17 +19,6 @@ For OpenAI, select `openai` for API keys or `openai-codex` for OAuth. Credential
 
 Use `uv run pi-harness providers` to list supported providers and `--provider` / `--model` to select one.
 
-## Proxy configuration
-
-`pi-harness` applies proxy settings to its fetch-based provider login, model discovery, and model requests. Set `PI_PROXY` to use one proxy for all HTTP and HTTPS traffic:
-
-```bash
-export PI_PROXY=socks5h://127.0.0.1:2089
-uv run pi-harness login openai-codex
-```
-
-HTTP, HTTPS, SOCKS4, and SOCKS5 proxy URLs are supported. Standard `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` variables are also honored, along with their lowercase forms. `NO_PROXY` bypasses the proxy for matching hosts; when `PI_PROXY` is used, `PI_NO_PROXY` can override that bypass list.
-
 ## Custom Python AI tools
 
 Wrap existing Python functions, models, or pipelines as tools for inference, computer vision, text processing, retrieval, data analysis, or 3D workflows. Tools run directly in Python, so they can reuse your libraries and loaded models without going through shell commands.
