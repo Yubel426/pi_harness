@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def normalize_base_url(value: str) -> str:
@@ -28,10 +28,11 @@ def normalize_base_url(value: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class HarnessConfig:
-    """Runtime settings. Secrets are read from the environment, never files."""
+    """Runtime settings; Pi resolves provider credentials separately."""
 
-    api_key: str
-    base_url: str = DEFAULT_BASE_URL
+    api_key: str | None = None
+    base_url: str | None = None
+    provider: str = "openai"
     model: str = DEFAULT_MODEL
     reasoning_effort: str | None = "medium"
     max_output_tokens: int | None = None
@@ -40,9 +41,12 @@ class HarnessConfig:
     cwd: Path = field(default_factory=Path.cwd)
 
     def __post_init__(self) -> None:
-        if not self.api_key.strip():
+        if self.api_key is not None and not self.api_key.strip():
             raise ValueError("API key cannot be empty")
-        object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
+        if self.base_url and self.provider == "openai":
+            object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
+        if not self.provider.strip():
+            raise ValueError("Provider cannot be empty")
         object.__setattr__(self, "cwd", self.cwd.expanduser().resolve())
         if not self.cwd.is_dir():
             raise ValueError(f"Working directory does not exist: {self.cwd}")
@@ -60,6 +64,7 @@ class HarnessConfig:
         cls,
         *,
         api_key: str | None = None,
+        provider: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
@@ -68,13 +73,10 @@ class HarnessConfig:
         max_tool_rounds: int = 100,
         cwd: str | Path | None = None,
     ) -> HarnessConfig:
-        resolved_key = (
-            api_key or os.environ.get("PI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        )
-        if not resolved_key:
-            raise ValueError(
-                "Set PI_API_KEY or OPENAI_API_KEY before starting the harness"
-            )
+        resolved_provider = provider or os.environ.get("PI_PROVIDER") or "openai"
+        # Native provider env vars are resolved by Pi. Do not accidentally use
+        # an OpenAI key for Anthropic, Codex OAuth, or another provider.
+        resolved_key = api_key or os.environ.get("PI_API_KEY")
 
         env_effort = os.environ.get("PI_REASONING_EFFORT")
         effort = (
@@ -87,10 +89,14 @@ class HarnessConfig:
 
         return cls(
             api_key=resolved_key,
+            provider=resolved_provider,
             base_url=base_url
             or os.environ.get("PI_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL")
-            or DEFAULT_BASE_URL,
+            or (
+                os.environ.get("OPENAI_BASE_URL")
+                if resolved_provider == "openai"
+                else None
+            ),
             model=model or os.environ.get("PI_MODEL") or DEFAULT_MODEL,
             reasoning_effort=effort,
             max_output_tokens=max_output_tokens,

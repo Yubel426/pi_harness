@@ -23,7 +23,14 @@ DEFAULT_MAX_BYTES = 50 * 1024
 MAX_TIMEOUT_SECONDS = 2_147_483.647
 
 _ANSI_ESCAPE = re.compile(r"(?:\x1B[@-_]|\x1B\[[0-?]*[ -/]*[@-~])")
-_HARNESS_SECRET_ENV = {"OPENAI_API_KEY", "PI_API_KEY"}
+_HARNESS_SECRET_ENV = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+}
 
 
 def _noop_output(_: str) -> None:
@@ -206,8 +213,11 @@ class BashExecutor:
                 )
 
         env = os.environ.copy()
-        for name in _HARNESS_SECRET_ENV:
-            env.pop(name, None)
+        for name in list(env):
+            if name in _HARNESS_SECRET_ENV or name.endswith(
+                ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+            ):
+                env.pop(name, None)
 
         output_queue: queue.Queue[bytes | None] = queue.Queue()
         process = subprocess.Popen(

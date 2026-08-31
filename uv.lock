@@ -194,19 +194,22 @@ wheels = [
 ]
 
 [[package]]
-name = "pi-terminal-harness"
-version = "0.1.0"
+name = "pi-harness"
+version = "0.2.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+openai = [
     { name = "httpx2", extra = ["socks"] },
     { name = "openai" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx2", extras = ["socks"], specifier = ">=2.12,<3" },
-    { name = "openai", specifier = ">=3.6,<4" },
+    { name = "httpx2", extras = ["socks"], marker = "extra == 'openai'", specifier = ">=2.12,<3" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=3.6,<4" },
 ]
+provides-extras = ["openai"]
 
 [[package]]
 name = "pydantic"

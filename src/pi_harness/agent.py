@@ -1,4 +1,4 @@
-"""Stateless Responses API agent loop with local Python function tools."""
+"""Single-prompt agent loop with local Python function tools and Pi LLM support."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .llm import PiClient
 from .tools import Tool, ToolContext, ToolResult
 
 
@@ -105,16 +106,16 @@ def _extract_text(response: Any) -> str:
 class Agent:
     """Single-prompt task runner modeled after Pi's core loop.
 
-    Each run keeps its own Responses output items and tool results until the task
-    finishes. This preserves reasoning for ``store=False`` tool continuation without
-    retaining conversation history between independent tasks.
+    Each run keeps its native model messages and tool results until the task
+    finishes. This preserves reasoning during tool continuation without retaining
+    conversation history between independent tasks.
     """
 
     def __init__(
         self,
         *,
         client: Any,
-        model: str,
+        model: str | Mapping[str, Any],
         instructions: str,
         tools: Sequence[Tool],
         cwd: str | Path,
@@ -172,6 +173,11 @@ class Agent:
                                 "Error: tool call was not executed because the model response "
                                 "was incomplete and its arguments may be truncated. Re-issue it."
                             ),
+                            **(
+                                {"is_error": True}
+                                if isinstance(self.client, PiClient)
+                                else {}
+                            ),
                         }
                     )
                 continue
@@ -199,6 +205,11 @@ class Agent:
                         "type": "function_call_output",
                         "call_id": _field(call, "call_id"),
                         "output": result.output,
+                        **(
+                            {"is_error": result.is_error}
+                            if isinstance(self.client, PiClient)
+                            else {}
+                        ),
                     }
                 )
 

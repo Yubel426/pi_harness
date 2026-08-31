@@ -63,6 +63,23 @@ class BashToolTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
         self.assertEqual(result.output, "done")
 
+    def test_other_provider_credentials_are_not_forwarded(self) -> None:
+        tool = create_bash_tool(self.cwd)
+        keys = {
+            "ANTHROPIC_API_KEY": "secret",
+            "GEMINI_API_KEY": "secret",
+            "GITHUB_TOKEN": "secret",
+            "AWS_SESSION_TOKEN": "secret",
+        }
+        with patch.dict(os.environ, keys):
+            result = tool.execute(
+                {
+                    "command": 'printf "%s" "${ANTHROPIC_API_KEY-unset}:${GEMINI_API_KEY-unset}:${GITHUB_TOKEN-unset}:${AWS_SESSION_TOKEN-unset}"'
+                },
+                ToolContext(self.cwd),
+            )
+        self.assertEqual(result.output, "unset:unset:unset:unset")
+
 
 if __name__ == "__main__":
     unittest.main()

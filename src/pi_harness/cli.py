@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from . import __version__
 from .agent import Agent, AgentCallbacks, AgentError, RunResult
 from .config import REASONING_EFFORTS, HarnessConfig
+from .llm import PiClient, PiError, setup_runtime
 from .tools import ToolResult, create_bash_tool
 
 
@@ -87,10 +88,42 @@ def _parser() -> argparse.ArgumentParser:
         prog="pi-harness",
         description="Single-prompt Pi-like terminal agent harness in Python",
     )
-    parser.add_argument("-p", "--prompt", required=True, help="Run one task and exit")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("setup", "login", "logout", "auth-status", "providers", "models"),
+    )
+    parser.add_argument(
+        "target", nargs="?", help="Provider for login/logout/status/models"
+    )
+    parser.add_argument("-p", "--prompt", help="Run one task and exit")
+    parser.add_argument(
+        "--provider", help="Provider ID (default: PI_PROVIDER or openai)"
+    )
+    parser.add_argument("--auth", choices=("oauth", "api_key"), help="Login method")
+    parser.add_argument(
+        "--api-key-stdin",
+        action="store_true",
+        help="Read an API key from stdin for login",
+    )
+    parser.add_argument(
+        "--auth-file", help="Separate credential file (default: user config directory)"
+    )
+    parser.add_argument("--runtime-dir", help="Pi Node.js runtime directory")
+    parser.add_argument(
+        "--json", action="store_true", help="Print catalog/status as JSON"
+    )
+    parser.add_argument(
+        "--available", action="store_true", help="Only list configured models"
+    )
+    parser.add_argument(
+        "--refresh", action="store_true", help="Refresh dynamic provider catalogs"
+    )
     parser.add_argument("--cwd", default=".", help="Working directory exposed to bash")
     parser.add_argument("--model", help="Model ID (default: PI_MODEL or gpt-5.6-sol)")
-    parser.add_argument("--base-url", help="API base URL (a missing /v1 is added)")
+    parser.add_argument(
+        "--base-url", help="API-key endpoint override (/v1 is added for OpenAI)"
+    )
     parser.add_argument(
         "--reasoning-effort",
         choices=(*REASONING_EFFORTS, "off"),
@@ -109,6 +142,7 @@ def _parser() -> argparse.ArgumentParser:
 def _create_agent(args: argparse.Namespace) -> Agent:
     config = HarnessConfig.from_environment(
         base_url=args.base_url,
+        provider=args.provider,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         max_output_tokens=args.max_output_tokens,
@@ -116,13 +150,13 @@ def _create_agent(args: argparse.Namespace) -> Agent:
         max_tool_rounds=args.max_tool_rounds,
         cwd=args.cwd,
     )
-    client = OpenAI(
+    client = PiClient(
+        provider=config.provider,
         api_key=config.api_key,
         base_url=config.base_url,
         timeout=config.request_timeout,
-        max_retries=2,
-        # Some OpenAI-compatible gateways reject the SDK's default user agent.
-        default_headers={"User-Agent": f"pi-terminal-harness/{__version__}"},
+        auth_file=args.auth_file,
+        runtime_dir=args.runtime_dir,
     )
     return Agent(
         client=client,
@@ -156,11 +190,32 @@ def _run_prompt(agent: Agent, prompt: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if not args.prompt.strip():
+    if args.command:
+        if args.prompt is not None:
+            parser.error("Management commands do not accept --prompt")
+        if args.command == "logout" and not (args.target or args.provider):
+            parser.error("logout requires a provider")
+        if args.api_key_stdin and (
+            args.command != "login"
+            or not (args.target or args.provider)
+            or args.auth == "oauth"
+        ):
+            parser.error(
+                "--api-key-stdin requires login PROVIDER and cannot be combined with OAuth"
+            )
+        try:
+            return _manage(args)
+        except (PiError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("[interrupted]", file=sys.stderr)
+            return 130
+    if args.prompt is None or not args.prompt.strip():
         parser.error("--prompt cannot be empty")
     try:
         agent = _create_agent(args)
-    except (ValueError, AgentError, ImportError) as exc:
+    except (ValueError, AgentError, PiError, ImportError) as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
 
@@ -168,6 +223,52 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if _run_prompt(agent, args.prompt) else 1
     finally:
         agent.client.close()
+
+
+def _manage(args: argparse.Namespace) -> int:
+    if args.command == "setup":
+        print(f"Pi runtime installed at {setup_runtime(args.runtime_dir)}")
+        return 0
+    provider = args.target or args.provider
+    with PiClient(
+        auth_file=args.auth_file,
+        runtime_dir=args.runtime_dir,
+        timeout=args.request_timeout,
+    ) as client:
+        if args.command == "login":
+            if args.api_key_stdin:
+                client.set_api_key(provider, sys.stdin.read().strip())
+                print(f"API key saved for {provider}")
+            else:
+                client.login(provider, args.auth)
+            return 0
+        if args.command == "logout":
+            client.logout(provider)
+            print(
+                f"Removed stored credentials for {provider}; environment credentials are unchanged"
+            )
+            return 0
+        if args.command == "providers":
+            rows = client.get_providers()
+            render = lambda row: (
+                f"{row['id']:<28} {', '.join(row['authMethods']) or 'ambient credentials'}"
+            )
+        elif args.command == "models":
+            rows = client.get_models(
+                provider, available=args.available, refresh=args.refresh
+            )
+            render = lambda row: f"{row['provider']}/{row['id']}  [{row['api']}]"
+        else:
+            rows = client.auth_status(provider)
+            render = lambda row: (
+                f"{row['provider']:<28} {row['source'] or ('stored ' + row['stored'] if row['stored'] else 'not configured')}"
+            )
+        if args.json:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+        else:
+            for row in rows:
+                print(render(row))
+    return 0
 
 
 if __name__ == "__main__":

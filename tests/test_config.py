@@ -35,12 +35,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.base_url, "https://provider.example/v1")
         self.assertEqual(config.model, "gpt-5.6-sol")
 
-    def test_missing_key_is_rejected(self) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            self.assertRaisesRegex(ValueError, "PI_API_KEY"),
+    def test_credentials_are_resolved_by_pi(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            config = HarnessConfig.from_environment(provider="openai-codex")
+        self.assertIsNone(config.api_key)
+        self.assertIsNone(config.base_url)
+        self.assertEqual(config.provider, "openai-codex")
+
+    def test_openai_environment_does_not_leak_to_other_providers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "secret", "OPENAI_BASE_URL": "https://example.test"},
+            clear=True,
         ):
-            HarnessConfig.from_environment()
+            config = HarnessConfig.from_environment(
+                provider="anthropic", base_url="https://api.anthropic.com"
+            )
+        self.assertIsNone(config.api_key)
+        self.assertEqual(config.base_url, "https://api.anthropic.com")
 
     def test_explicit_off_disables_reasoning_parameter(self) -> None:
         config = HarnessConfig.from_environment(
