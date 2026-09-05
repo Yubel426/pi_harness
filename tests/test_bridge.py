@@ -22,7 +22,7 @@ from pi_harness import Agent, PiClient, PiError, Tool
 from pi_harness.llm import runtime_directory
 
 
-def openai_events(text="hello", *, tool=False):
+def openai_events(text="hello", *, tool=False, model="gpt-4o-mini"):
     if tool:
         item = {
             "type": "function_call",
@@ -42,7 +42,7 @@ def openai_events(text="hello", *, tool=False):
         }
     response = {
         "id": "resp_local",
-        "model": "gpt-4o-mini",
+        "model": model,
         "status": "completed",
         "output": [item],
         "usage": {
@@ -369,6 +369,52 @@ console.log(JSON.stringify({ status: response.status, body: await response.text(
     def test_unknown_model_fails_without_network(self):
         with self.assertRaisesRegex(PiError, "Unknown model"):
             self.client().get_model("openai", "not-a-model")
+
+    def test_astra_is_available_in_api_and_oauth_catalogs(self):
+        for provider in ("openai", "openai-codex"):
+            with self.subTest(provider=provider):
+                client = self.client()
+                self.assertIn(
+                    "gpt-6-astra", {m["id"] for m in client.get_models(provider)}
+                )
+                model = client.get_model(provider, "gpt-6-astra")
+                self.assertEqual(model["provider"], provider)
+                self.assertEqual(model["thinkingLevelMap"]["max"], "max")
+
+    def test_cli_selects_astra_and_sends_responses_request(self):
+        server, base_url = self.server(
+            [openai_events(model="gpt-6-astra"), openai_events(model="gpt-6-astra")]
+        )
+        for extra_args in ([], ["--no-stream"]):
+            with self.subTest(extra_args=extra_args):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pi_harness",
+                        "--provider", "openai",
+                        "--model", "gpt-6-astra",
+                        "--base-url", base_url,
+                        "--auth-file", str(self.auth_file),
+                        "--reasoning-effort", "medium",
+                        "--max-output-tokens", "64",
+                        "-p", "a",
+                        *extra_args,
+                    ],
+                    env={**os.environ, "PI_API_KEY": "test-key"},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("hello", result.stdout)
+                self.assertIn("model=gpt-6-astra", result.stdout)
+                path, payload = server.requests[-1]
+                self.assertEqual(path, "/v1/responses")
+                self.assertEqual(payload["model"], "gpt-6-astra")
+                self.assertEqual(payload["reasoning"]["effort"], "medium")
+                self.assertEqual(payload["max_output_tokens"], 64)
+                self.assertTrue(payload["tools"])
 
     def test_raw_complete_and_stream_use_real_pi_adapter(self):
         server, base_url = self.server([openai_events(), openai_events("world")])

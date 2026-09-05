@@ -37,7 +37,7 @@ function resolveModel(request) {
   }
   provider(request.provider);
   const value = models.getModel(request.provider, specification);
-  if (!value) throw new Error(`Unknown model ${request.provider}/${specification}; use 'pi-harness models ${request.provider}' or supply a full Pi model definition`);
+  if (!value) throw new Error(`Unknown model ${request.provider}/${specification}; use 'pi-harness models ${request.provider}' or supply a full Pi model definition. For newly released models, update pi-harness and run 'pi-harness setup' to update the bundled catalog.`);
   return request.baseUrl ? { ...value, baseUrl: request.baseUrl } : value;
 }
 
