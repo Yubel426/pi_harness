@@ -444,23 +444,25 @@ console.log(JSON.stringify({ status: response.status, body: await response.text(
 
     def test_terminal_response_finishes_without_waiting_for_http_eof(self):
         for streaming in (False, True):
-            with self.subTest(streaming=streaming):
-                server, url = self.server([openai_events()], hold_open=True)
-                client = self.client(base_url=url, api_key="test-key")
-                client.timeout = 2
-                context = {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
-                try:
-                    if streaming:
-                        events = list(client.stream_simple("gpt-4o-mini", context))
-                        message = events[-1]["message"]
-                        self.assertEqual(events[-1]["type"], "done")
-                    else:
-                        message = client.complete_simple("gpt-4o-mini", context)
-                    self.assertEqual(message["content"][0]["text"], "hello")
-                    self.assertEqual(message["stopReason"], "stop")
-                    self.assertEqual(message["usage"]["totalTokens"], 12)
-                finally:
-                    server.release_response.set()
+            for newline in ("\n", "\r\n", "\r"):
+                with self.subTest(streaming=streaming, newline=newline):
+                    body = openai_events().replace("\n", newline)
+                    server, url = self.server([body], hold_open=True)
+                    client = self.client(base_url=url, api_key="test-key")
+                    client.timeout = 2
+                    context = {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
+                    try:
+                        if streaming:
+                            events = list(client.stream_simple("gpt-4o-mini", context))
+                            message = events[-1]["message"]
+                            self.assertEqual(events[-1]["type"], "done")
+                        else:
+                            message = client.complete_simple("gpt-4o-mini", context)
+                        self.assertEqual(message["content"][0]["text"], "hello")
+                        self.assertEqual(message["stopReason"], "stop")
+                        self.assertEqual(message["usage"]["totalTokens"], 12)
+                    finally:
+                        server.release_response.set()
 
     def test_disconnect_error_after_completed_response_does_not_override_success(self):
         body = openai_events() + 'data: {"error":"stream_read_error"}\n\n'
@@ -508,36 +510,40 @@ console.log(JSON.stringify({ status: response.status, body: await response.text(
         script = r"""
 import assert from 'node:assert/strict';
 const { fetchResponses } = await import(process.argv[1]);
+const timeout = setTimeout(() => assert.fail('Terminal event did not finish the stream'), 5000);
 for (const newline of ['\n', '\r\n', '\r']) {
   for (const chunkSize of [1, 7, 65536]) {
-    const terminal = JSON.stringify({
-      type: 'response.completed', response: { status: 'completed' },
-    }, null, 2).split('\n').map(line => `data: ${line}`).join('\n');
-    const prefix = ': keepalive\n\ndata: ' + JSON.stringify({
-      type: 'response.output_text.delta', delta: '你好 response.completed',
-    }) + '\n\n';
-    const expected = `${prefix}${terminal}\n\n`;
-    const data = new TextEncoder().encode(
-      (expected + 'data: {"error":"stream_read_error"}\n\n').replaceAll('\n', newline),
-    );
-    let offset = 0, cancelled = false;
-    globalThis.fetch = async () => new Response(new ReadableStream({
-      pull(controller) {
-        if (offset < data.length) {
-          controller.enqueue(data.slice(offset, offset + chunkSize));
-          offset += chunkSize;
-        }
-        // The relay intentionally never closes this body.
-      },
-      cancel() { cancelled = true; },
-    }), { headers: { 'Content-Type': 'text/event-stream', 'Content-Length': String(data.length) } });
-    const response = await fetchResponses('https://example.test/v1/responses');
-    assert.equal(await response.text(), expected);
-    assert.equal(response.headers.get('content-length'), null);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(cancelled, true);
+    for (const suffix of ['', 'data: {"error":"stream_read_error"}\n\n']) {
+      const terminal = JSON.stringify({
+        type: 'response.completed', response: { status: 'completed' },
+      }, null, 2).split('\n').map(line => `data: ${line}`).join('\n');
+      const prefix = ': keepalive\n\ndata: ' + JSON.stringify({
+        type: 'response.output_text.delta', delta: '你好 response.completed',
+      }) + '\n\n';
+      const expected = `${prefix}${terminal}\n\n`;
+      const data = new TextEncoder().encode(
+        (expected + suffix).replaceAll('\n', newline),
+      );
+      let offset = 0, cancelled = false;
+      globalThis.fetch = async () => new Response(new ReadableStream({
+        pull(controller) {
+          if (offset < data.length) {
+            controller.enqueue(data.slice(offset, offset + chunkSize));
+            offset += chunkSize;
+          }
+          // The relay intentionally never closes this body.
+        },
+        cancel() { cancelled = true; },
+      }), { headers: { 'Content-Type': 'text/event-stream', 'Content-Length': String(data.length) } });
+      const response = await fetchResponses('https://example.test/v1/responses');
+      assert.equal(await response.text(), expected);
+      assert.equal(response.headers.get('content-length'), null);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(cancelled, true);
+    }
   }
 }
+clearTimeout(timeout);
 """
         result = subprocess.run(
             ["node", "--input-type=module", "-e", script, str(runtime_directory() / "responses.mjs")],

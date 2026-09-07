@@ -11,7 +11,10 @@ function isTerminal(record) {
   catch { return false; } // Let Pi report malformed or provider error events.
 }
 
-/** End a Responses SSE body at its terminal event, even if a relay keeps it open. */
+/**
+ * End a Responses SSE body at its terminal event, even if a relay keeps it open.
+ * See https://github.com/earendil-works/pi/issues/6808.
+ */
 export async function fetchResponses(input, init) {
   const response = await globalThis.fetch(input, init);
   if (!response.ok || !response.body ||
@@ -22,12 +25,14 @@ export async function fetchResponses(input, init) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = '';
-  let trailingCR = false;
-  const forward = (text, controller, final = false) => {
-    // A CRLF separator, UTF-8 character, or JSON value can span network chunks.
-    text = (trailingCR ? '\r' : '') + text;
-    trailingCR = !final && text.endsWith('\r');
-    if (trailingCR) text = text.slice(0, -1);
+  let skipLF = false;
+  const forward = (text, controller) => {
+    // A split UTF-8 character can decode to nothing; keep the CRLF state intact.
+    if (!text) return false;
+    // CR ends a line immediately. Only suppress its optional LF in the next chunk,
+    // so a terminal event ending in CR CR never needs another byte or HTTP EOF.
+    if (skipLF && text.startsWith('\n')) text = text.slice(1);
+    skipLF = text.endsWith('\r');
     pending += text.replace(/\r\n?/g, '\n');
     let boundary;
     while ((boundary = pending.indexOf('\n\n')) !== -1) {
@@ -48,7 +53,7 @@ export async function fetchResponses(input, init) {
       forward(decoder.decode(chunk, { stream: true }), controller);
     },
     flush(controller) {
-      if (!forward(decoder.decode(), controller, true) && pending) {
+      if (!forward(decoder.decode(), controller) && pending) {
         controller.enqueue(encoder.encode(pending));
       }
     },
