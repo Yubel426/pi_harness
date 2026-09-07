@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { FileCredentialStore, FileCatalogStore } from './credentials.mjs';
 import { installProxySupport } from './proxy.mjs';
+import { fetchResponses } from './responses.mjs';
 
 const controller = new AbortController();
 process.on('SIGTERM', () => controller.abort());
@@ -49,6 +50,7 @@ async function dispatch(request) {
   }
   if (request.context) {
     const selected = resolveModel(request);
+    if (selected.api === 'openai-responses') options.fetch = fetchResponses;
     const stored = await credentials.read(selected.provider);
     if (stored?.type === 'oauth' && !request.options?.apiKey &&
         (request.baseUrl || (typeof request.model === 'object' &&

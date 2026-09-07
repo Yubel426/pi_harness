@@ -100,6 +100,13 @@ def recv_exact(connection, size):
     return b"".join(chunks)
 
 
+class HeldOpenHandler(StubHandler):
+    def do_POST(self):
+        super().do_POST()
+        self.wfile.flush()
+        self.server.release_response.wait(5)
+
+
 class SocksHandler(socketserver.BaseRequestHandler):
     def handle(self):
         client = self.request
@@ -173,13 +180,17 @@ class BridgeIntegrationTests(unittest.TestCase):
         self.addCleanup(client.close)
         return client
 
-    def server(self, responses):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), StubHandler)
+    def server(self, responses, *, hold_open=False):
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), HeldOpenHandler if hold_open else StubHandler
+        )
+        server.release_response = threading.Event()
         server.responses, server.requests = list(responses), []
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         def close():
+            server.release_response.set()
             server.shutdown()
             server.server_close()
             thread.join()
@@ -430,6 +441,109 @@ console.log(JSON.stringify({ status: response.status, body: await response.text(
         self.assertEqual(events[-1]["type"], "done")
         self.assertTrue(all(path == "/v1/responses" for path, _ in server.requests))
         self.assertFalse(server.requests[0][1]["store"])
+
+    def test_terminal_response_finishes_without_waiting_for_http_eof(self):
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                server, url = self.server([openai_events()], hold_open=True)
+                client = self.client(base_url=url, api_key="test-key")
+                client.timeout = 2
+                context = {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
+                try:
+                    if streaming:
+                        events = list(client.stream_simple("gpt-4o-mini", context))
+                        message = events[-1]["message"]
+                        self.assertEqual(events[-1]["type"], "done")
+                    else:
+                        message = client.complete_simple("gpt-4o-mini", context)
+                    self.assertEqual(message["content"][0]["text"], "hello")
+                    self.assertEqual(message["stopReason"], "stop")
+                    self.assertEqual(message["usage"]["totalTokens"], 12)
+                finally:
+                    server.release_response.set()
+
+    def test_disconnect_error_after_completed_response_does_not_override_success(self):
+        body = openai_events() + 'data: {"error":"stream_read_error"}\n\n'
+        server, url = self.server([body])
+        message = self.client(base_url=url, api_key="test-key").complete_simple(
+            "gpt-4o-mini", {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
+        )
+        self.assertEqual(message["stopReason"], "stop", message.get("errorMessage"))
+        self.assertEqual(message["content"][0]["text"], "hello")
+
+    def test_missing_terminal_response_and_early_errors_still_fail(self):
+        prefix = openai_events().split("event: response.completed")[0]
+        for suffix in ("", 'data: {"error":"stream_read_error"}\n\n'):
+            with self.subTest(suffix=suffix):
+                server, url = self.server([prefix + suffix])
+                message = self.client(base_url=url, api_key="test-key").complete_simple(
+                    "gpt-4o-mini", {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
+                )
+                self.assertEqual(message["stopReason"], "error")
+                self.assertTrue(message["errorMessage"])
+
+    def test_terminal_failure_and_incomplete_status_are_preserved(self):
+        for status, reason in (("failed", "error"), ("incomplete", "length")):
+            with self.subTest(status=status):
+                response = {
+                    "id": "resp_local", "status": status,
+                    "error": {"code": "server_error", "message": "failed upstream"},
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                }
+                event = {"type": f"response.{status}", "response": response}
+                body = openai_events().split("event: response.completed")[0]
+                body += f"data: {json.dumps(event)}\n\n"
+                server, url = self.server([body], hold_open=True)
+                client = self.client(base_url=url, api_key="test-key")
+                client.timeout = 2
+                try:
+                    message = client.complete_simple(
+                        "gpt-4o-mini", {"messages": [{"role": "user", "content": "hello", "timestamp": 1}]}
+                    )
+                    self.assertEqual(message["stopReason"], reason)
+                finally:
+                    server.release_response.set()
+
+    def test_responses_transport_handles_split_sse_and_cancels_upstream(self):
+        script = r"""
+import assert from 'node:assert/strict';
+const { fetchResponses } = await import(process.argv[1]);
+for (const newline of ['\n', '\r\n', '\r']) {
+  for (const chunkSize of [1, 7, 65536]) {
+    const terminal = JSON.stringify({
+      type: 'response.completed', response: { status: 'completed' },
+    }, null, 2).split('\n').map(line => `data: ${line}`).join('\n');
+    const prefix = ': keepalive\n\ndata: ' + JSON.stringify({
+      type: 'response.output_text.delta', delta: '你好 response.completed',
+    }) + '\n\n';
+    const expected = `${prefix}${terminal}\n\n`;
+    const data = new TextEncoder().encode(
+      (expected + 'data: {"error":"stream_read_error"}\n\n').replaceAll('\n', newline),
+    );
+    let offset = 0, cancelled = false;
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (offset < data.length) {
+          controller.enqueue(data.slice(offset, offset + chunkSize));
+          offset += chunkSize;
+        }
+        // The relay intentionally never closes this body.
+      },
+      cancel() { cancelled = true; },
+    }), { headers: { 'Content-Type': 'text/event-stream', 'Content-Length': String(data.length) } });
+    const response = await fetchResponses('https://example.test/v1/responses');
+    assert.equal(await response.text(), expected);
+    assert.equal(response.headers.get('content-length'), null);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(cancelled, true);
+  }
+}
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script, str(runtime_directory() / "responses.mjs")],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_real_pi_tool_round_trip_remains_single_prompt(self):
         server, base_url = self.server(

@@ -23,6 +23,7 @@ _FILES = (
     "bridge.mjs",
     "credentials.mjs",
     "proxy.mjs",
+    "responses.mjs",
 )
 
 
